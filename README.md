@@ -24,9 +24,11 @@ python3 export_charge_history.py
 | 参数 | 说明 |
 | --- | --- |
 | `--out` | CSV 输出路径，默认 `charge_history.csv` |
-| `--json` | 可选，同时导出原始 JSON（保留接口返回的全部字段） |
+| `--json` | 可选，同时导出原始 JSON；必须同时添加 `--acknowledge-sensitive-json` |
 | `--connector-id` | 只导出指定充电桩，可重复传入多个 |
-| `--phone` / `--password` | 也可通过参数或环境变量（`VOLVO_PHONE`/`VOLVO_PASSWORD`）传入，避免交互 |
+| `--phone` | 也可通过 `VOLVO_PHONE` 环境变量传入 |
+
+密码只能通过隐藏回显的交互提示或 `VOLVO_PASSWORD` 环境变量提供。脚本不接受 `--password`，以免密码进入 shell 历史和进程列表。
 
 其余参数（`--app-key`、`--app-secret`、`--timeout`、`--retries`）用 `--help` 查看，通常不需要改动。
 
@@ -53,7 +55,9 @@ CSV 使用 UTF-8 with BOM 编码，Excel / WPS 打开中文不会乱码。
 
 - 不要把密码提交到版本库、写进公开文档、留在 shell 历史或日志里；
 - 脚本不会把 token 或凭证写入磁盘，只写出你指定的 CSV / JSON；
-- 导出文件包含你的充电记录（时间、电量、订单号等），属于个人数据，分享前请注意脱敏。
+- 终端输出不会显示完整充电桩名称或 `connectorId`，HTTP 错误响应正文也会被隐藏；
+- CSV 已限定为文档列出的字段，但仍包含时间、电量、订单号和充电桩标识等个人数据；
+- 原始 JSON 可能含有未来新增的额外字段，因此必须显式添加 `--acknowledge-sensitive-json`，并且不应直接分享。
 
 ## 常见问题
 

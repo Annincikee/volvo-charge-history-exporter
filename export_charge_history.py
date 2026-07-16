@@ -82,6 +82,12 @@ def redact_phone(phone: str) -> str:
     return f"{phone[:3]}****{phone[-4:]}" if len(phone) >= 7 else "***"
 
 
+def mask_identifier(value: str) -> str:
+    """Return a stable console-safe reference without revealing an identifier."""
+    digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:8]
+    return f"id-{digest}"
+
+
 def json_bytes(value: Any) -> bytes:
     """Match a normal app JSON request while keeping Chinese text readable."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -201,21 +207,23 @@ class VolvoClient:
                 if not isinstance(result, dict):
                     raise VolvoApiError("接口返回的 JSON 不是对象")
                 if not result.get("success"):
-                    raise VolvoApiError(
-                        str(result.get("errMsg") or result.get("msg") or "接口请求失败")
-                    )
+                    raise VolvoApiError("接口请求失败（服务端拒绝请求，响应详情已隐藏）")
                 return result
             except HTTPError as error:
-                detail = error.read().decode("utf-8", errors="replace")
+                error.read()  # Drain the response without exposing its body.
                 if attempt < self.retries and error.code >= 500:
                     time.sleep(2**attempt)
                     continue
-                raise VolvoApiError(f"HTTP {error.code}: {detail[:500]}") from error
+                raise VolvoApiError(
+                    f"HTTP {error.code}：服务端响应内容已隐藏"
+                ) from error
             except URLError as error:
                 if attempt < self.retries:
                     time.sleep(2**attempt)
                     continue
-                raise VolvoApiError(f"网络请求失败：{error.reason}") from error
+                raise VolvoApiError(
+                    f"网络请求失败（{type(error.reason).__name__}）"
+                ) from error
             except json.JSONDecodeError as error:
                 raise VolvoApiError("接口返回了无法解析的 JSON") from error
 
@@ -332,7 +340,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="登录沃尔沃汽车中国区账户，导出账号名下所有家充桩的充电记录。"
     )
     parser.add_argument("--phone", help="手机号；默认读取 VOLVO_PHONE")
-    parser.add_argument("--password", help="账户密码；默认读取 VOLVO_PASSWORD，未提供时安全地交互输入")
     parser.add_argument(
         "--app-key",
         help="网关 App Key；默认读取 VOLVO_APP_KEY，均未提供时使用内置的官方 App 公共值",
@@ -343,6 +350,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--out", type=Path, default=Path("charge_history.csv"), help="CSV 输出路径（默认：charge_history.csv）")
     parser.add_argument("--json", type=Path, help="可选：原始 JSON 输出路径")
+    parser.add_argument(
+        "--acknowledge-sensitive-json",
+        action="store_true",
+        help="确认理解原始 JSON 可能包含额外个人数据；与 --json 同时使用",
+    )
     parser.add_argument("--connector-id", action="append", default=[], help="仅导出指定 connectorId；可重复使用")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help=f"请求超时秒数（默认：{DEFAULT_TIMEOUT_SECONDS}）")
     parser.add_argument("--retries", type=int, default=2, help="网络/5xx 错误重试次数（默认：2）")
@@ -352,9 +364,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(args: argparse.Namespace) -> int:
     if args.timeout <= 0 or args.retries < 0:
         raise ValueError("--timeout 必须大于 0，--retries 不能小于 0")
+    if args.json and not args.acknowledge_sensitive_json:
+        raise ValueError(
+            "--json 会保留接口返回的额外个人数据；如确需导出，请同时添加 "
+            "--acknowledge-sensitive-json"
+        )
 
     phone = normalize_phone(get_value(args.phone, "VOLVO_PHONE", "手机号"))
-    password = get_secret(args.password, "VOLVO_PASSWORD", "账户密码")
+    password = get_secret(None, "VOLVO_PASSWORD", "账户密码")
     # App Key/Secret are not per-user secrets — they're the fixed gateway
     # signing credentials Volvo's own app ships with, so a built-in default
     # is safe here. --app-key/--app-secret (or the env vars) still let you
@@ -374,18 +391,19 @@ def run(args: argparse.Namespace) -> int:
         piles = [pile for pile in piles if str(pile.get("connectorId") or "") in requested]
         missing = requested - {str(pile.get("connectorId") or "") for pile in piles}
         if missing:
-            raise VolvoApiError(f"未找到指定充电桩：{', '.join(sorted(missing))}")
+            masked = ", ".join(mask_identifier(value) for value in sorted(missing))
+            raise VolvoApiError(f"未找到指定充电桩：{masked}")
     if not piles:
         raise VolvoApiError("该账户下没有绑定的家充桩")
 
     all_rows: list[dict[str, Any]] = []
-    for pile in piles:
+    for index, pile in enumerate(piles, start=1):
         connector_id = str(pile.get("connectorId") or "")
         if not connector_id:
             print("跳过缺少 connectorId 的充电桩记录", file=sys.stderr)
             continue
         name = str(pile.get("equipmentName") or pile.get("equipmentUserName") or connector_id)
-        print(f"正在导出：{name} ({connector_id}) …")
+        print(f"正在导出充电桩 {index}（{mask_identifier(connector_id)}）…")
         history = client.list_charge_history(tokens, connector_id)
         for row in history:
             enriched = dict(row)
