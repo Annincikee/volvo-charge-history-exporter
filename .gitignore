@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+charge_history.csv
+charge_history.json
